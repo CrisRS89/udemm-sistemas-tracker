@@ -20,6 +20,9 @@ Esta app te permite organizar tus materias de manera visual (arrastrando tarjeta
 
 ## 🚀 Instalación y Configuración Rápida
 
+> [!NOTE]
+> **No necesitás configurar nada de entrada**: De forma predeterminada, todo tu progreso se guarda localmente y de forma privada en el **LocalStorage de tu navegador** (Modo Local). Los pasos de Firebase son 100% opcionales, solo si querés habilitar la sincronización en la nube y compartir tu plan.
+
 Cualquier estudiante puede clonar y levantar este proyecto localmente en su máquina con solo tres pasos:
 
 ### 1. Clonar el repositorio e instalar dependencias
