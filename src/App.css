@@ -32,6 +32,14 @@
   gap: 0.75rem;
 }
 
+.udemm-logo {
+  width: 104px;
+  height: auto;
+  max-height: 46px;
+  object-fit: contain;
+  object-position: left center;
+}
+
 .logo-icon {
   color: var(--primary);
   filter: drop-shadow(0 0 8px rgba(139, 92, 246, 0.4));
@@ -52,6 +60,67 @@
   font-weight: 400;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+.career-picker-label {
+  display: block;
+  margin-top: 0.16rem;
+}
+
+.career-picker {
+  width: min(270px, 40vw);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.025em;
+  cursor: pointer;
+}
+
+.career-picker option {
+  background: #171923;
+  color: var(--text-primary);
+}
+
+.career-source-link {
+  display: inline-block;
+  margin-top: 0.22rem;
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+.career-source-link:hover { color: var(--accent-hover); }
+
+.catalog-warning {
+  margin: 0 0 0.65rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.1);
+  color: #fcd34d;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.catalog-warning-page { margin: -1rem 0 1.5rem; }
+
+.restore-backup-label {
+  display: block;
+  margin-top: 0.65rem;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+.restore-backup-label input { display: block; margin-top: 0.4rem; width: 100%; }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .nav-tabs {
@@ -159,6 +228,10 @@
   background: var(--text-muted);
 }
 
+.led.signed-out {
+  background: var(--text-muted);
+}
+
 .led.syncing {
   background: var(--color-studying);
   animation: pulse-glow 1.5s infinite;
@@ -167,6 +240,40 @@
 .led.synced {
   background: var(--color-approved);
   box-shadow: 0 0 8px var(--color-approved);
+}
+
+.led.error {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.65);
+}
+
+.cloud-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: 190px;
+  padding: 0.32rem 0.65rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.cloud-user:hover {
+  color: var(--text-primary);
+  border-color: var(--border-color-hover);
+}
+
+.cloud-user img {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+.cloud-user span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .action-btn {
@@ -244,6 +351,20 @@
   display: flex;
   gap: 0.75rem;
   align-items: center;
+}
+
+.availability-filter {
+  gap: 0.4rem;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+.availability-filter:hover, .availability-filter.active {
+  color: var(--color-approved);
+  border-color: rgba(16, 185, 129, 0.45);
+  background: var(--bg-approved);
 }
 
 .select-filter {
@@ -501,6 +622,60 @@
   gap: 0.5rem;
   cursor: pointer;
   font-size: 0.9rem;
+}
+
+.cloud-account-panel {
+  margin-top: 0.5rem;
+  padding: 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: rgba(139, 92, 246, 0.06);
+}
+
+.cloud-account-heading,
+.cloud-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.cloud-account-heading svg {
+  flex: 0 0 auto;
+  color: var(--primary-hover);
+}
+
+.cloud-account-heading p,
+.cloud-help,
+.cloud-error {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.cloud-account-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  margin-top: 0.4rem;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+}
+
+.cloud-error {
+  color: #fca5a5;
+}
+
+@media (max-width: 900px) {
+  .app-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .sync-section {
+    width: 100%;
+    flex-wrap: wrap;
+  }
 }
 
 /* AI Assistant Interface */

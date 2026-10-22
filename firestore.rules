@@ -1,0 +1,49 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isSupportedCareer(careerId) {
+      return careerId in [
+        'sistemas',
+        'electronica',
+        'industrial',
+        'mecanica',
+        'electromecanica'
+      ];
+    }
+
+    function isValidPlan(careerId) {
+      return request.resource.data.keys().hasOnly([
+          'version',
+          'careerId',
+          'subjects',
+          'strictMode',
+          'updatedAt',
+          'updatedAtIso'
+        ])
+        && request.resource.data.version == 3
+        && request.resource.data.careerId == careerId
+        && isSupportedCareer(careerId)
+        && request.resource.data.subjects is list
+        && request.resource.data.subjects.size() <= 200
+        && request.resource.data.strictMode is bool
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.updatedAtIso is string;
+    }
+
+    match /users/{userId}/careers/{careerId} {
+      allow read: if isOwner(userId);
+      allow create, update: if isOwner(userId) && isValidPlan(careerId);
+      allow delete: if isOwner(userId);
+    }
+
+    // Todo lo demás, incluidos los antiguos shared_plans anónimos, queda cerrado.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

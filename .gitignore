@@ -12,6 +12,18 @@ dist
 dist-ssr
 *.local
 
+# Configuración local y credenciales de servicios
+.env
+.env.*
+!.env.example
+
+# Estado local de Firebase CLI
+.firebase/
+firebase-debug.log
+
+# PDFs oficiales usados como referencia para transcribir los catálogos
+carreras/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

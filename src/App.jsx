@@ -1,63 +1,117 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
-  INITIAL_SUBJECTS, 
   ELECTIVES_I, 
   ELECTIVES_II 
 } from "./data/subjects";
+import { CAREER_CATALOGS, getCareerCatalog, progressStorageKey } from "./data/catalogs";
+import { validateCatalog } from "./data/catalogValidation";
 import { 
   db, 
+  auth,
+  googleProvider,
   isConfigured as isFirebaseConfigured, 
-  signInAnonymously, 
   doc, 
-  getDoc, 
-  setDoc 
+  onAuthStateChanged,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+  signInWithPopup,
+  signOut,
 } from "./firebase";
+import udemmLogo from "../logo/Logotipo UdeMM Universidad Privada.png";
 import { 
   GraduationCap, 
   Award, 
   TrendingUp, 
   Sparkles, 
-  Share2, 
+  Cloud,
   CheckCircle2, 
   Lock, 
   Unlock, 
   Settings, 
   Send, 
-  RefreshCw, 
-  AlertCircle, 
   BookOpen, 
   Trash2, 
-  Plus, 
-  ChevronRight, 
   Search, 
-  FileText 
+  FileText,
+  LogIn,
+  LogOut,
 } from "lucide-react";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import "./App.css";
 
 // Clave de API de Gemini desde entorno
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+const DEFAULT_CAREER_ID = "sistemas";
+const PROGRESS_STATUSES = new Set(["pending", "studying", "regular", "approved"]);
+
+const isAvailableCareer = (careerId) =>
+  CAREER_CATALOGS.some((career) => career.id === careerId && career.available);
+
+const parseStoredProgress = (rawProgress, fallback) => {
+  if (!rawProgress) return fallback;
+
+  try {
+    const parsed = JSON.parse(rawProgress);
+    return Array.isArray(parsed) ? parsed : fallback;
+  } catch {
+    // No se reemplaza el valor almacenado: el usuario todavía puede recuperarlo
+    // manualmente desde el navegador si alguna vez hubiera quedado corrupto.
+    return fallback;
+  }
+};
+
+const getStoredProgress = (careerId) => {
+  const catalog = getCareerCatalog(careerId);
+  const ownProgress = localStorage.getItem(progressStorageKey(careerId));
+  const legacyProgress = careerId === DEFAULT_CAREER_ID
+    ? localStorage.getItem("udemm_tracker_subjects")
+    : null;
+  return parseStoredProgress(ownProgress || legacyProgress, catalog.subjects);
+};
+
+const serializePlan = (subjects, strictMode) => JSON.stringify({ subjects, strictMode });
+
+const isValidCloudPlan = (data, careerId) =>
+  data?.careerId === careerId &&
+  Array.isArray(data.subjects) &&
+  data.subjects.every(
+    (subject) => typeof subject?.id === "string" && PROGRESS_STATUSES.has(subject?.status)
+  ) &&
+  typeof data.strictMode === "boolean";
 
 function App() {
   // --- Estados de la aplicación ---
+  const [careerId, setCareerId] = useState(() => {
+    const storedCareer = localStorage.getItem("udemm_tracker_career");
+    return isAvailableCareer(storedCareer) ? storedCareer : DEFAULT_CAREER_ID;
+  });
+  const career = getCareerCatalog(careerId);
+  const catalogValidation = validateCatalog(career);
   const [subjects, setSubjects] = useState(() => {
-    const localData = localStorage.getItem("udemm_tracker_subjects");
-    return localData ? JSON.parse(localData) : INITIAL_SUBJECTS;
+    const storedCareer = localStorage.getItem("udemm_tracker_career");
+    const savedCareer = isAvailableCareer(storedCareer) ? storedCareer : DEFAULT_CAREER_ID;
+    return getStoredProgress(savedCareer);
   });
 
   const [activeTab, setActiveTab] = useState("kanban"); // "kanban", "map", "ai"
   const [searchTerm, setSearchTerm] = useState("");
   const [yearFilter, setYearFilter] = useState("all"); // "all", "1", "2", "3", "4", "5", "Talleres", "Otros"
+  const [availableOnly, setAvailableOnly] = useState(false);
   const [strictMode, setStrictMode] = useState(() => {
     const localStrict = localStorage.getItem("udemm_tracker_strict");
     return localStrict ? JSON.parse(localStrict) === true : true;
   });
 
-  // Estado para Sincronización en la Nube
-  const [syncStatus, setSyncStatus] = useState(isFirebaseConfigured ? "synced" : "local"); // "local", "syncing", "synced"
-  const [shareCode, setShareCode] = useState("");
-  const [inputShareCode, setInputShareCode] = useState("");
-  const [showShareModal, setShowShareModal] = useState(false);
+  // Estado para sincronización privada, autenticada y en tiempo real.
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authReady, setAuthReady] = useState(!isFirebaseConfigured);
+  const [authError, setAuthError] = useState("");
+  const [syncStatus, setSyncStatus] = useState(isFirebaseConfigured ? "signed-out" : "local");
+  const subjectsRef = useRef(subjects);
+  const strictModeRef = useRef(strictMode);
+  const cloudReadyRef = useRef(false);
+  const resolvedCloudPlansRef = useRef(new Set());
 
   // Modales
   const [selectedSubject, setSelectedSubject] = useState(null);
@@ -70,7 +124,7 @@ function App() {
   const [messages, setMessages] = useState([
     { 
       sender: "assistant", 
-      text: "¡Hola! Che, soy tu tutor académico de Ingeniería en Sistemas para la UdeMM. Decime en qué te puedo ayudar hoy. Puedo armarte una planificación, explicarte correlativas o simular preguntas para que rindas un final. ¿Por dónde empezamos?" 
+      text: "¡Hola! Che, soy tu tutor académico de UdeMM. Decime en qué te puedo ayudar hoy. Puedo armarte una planificación, explicarte correlativas o simular preguntas para que rindas un final. ¿Por dónde empezamos?"
     }
   ]);
   const [inputValue, setInputValue] = useState("");
@@ -79,9 +133,122 @@ function App() {
 
   // --- Efecto de Persistencia Local ---
   useEffect(() => {
-    localStorage.setItem("udemm_tracker_subjects", JSON.stringify(subjects));
+    subjectsRef.current = subjects;
+    strictModeRef.current = strictMode;
+    localStorage.setItem(progressStorageKey(careerId), JSON.stringify(subjects));
+    // Se conserva la clave anterior como compatibilidad y respaldo de Sistemas.
+    if (careerId === "sistemas") localStorage.setItem("udemm_tracker_subjects", JSON.stringify(subjects));
     localStorage.setItem("udemm_tracker_strict", JSON.stringify(strictMode));
-  }, [subjects, strictMode]);
+  }, [subjects, strictMode, careerId]);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return undefined;
+
+    return onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setAuthReady(true);
+      setAuthError("");
+      cloudReadyRef.current = false;
+      setSyncStatus(user ? "syncing" : "signed-out");
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !currentUser) return undefined;
+
+    cloudReadyRef.current = false;
+    setSyncStatus("syncing");
+    const planKey = `${currentUser.uid}:${careerId}`;
+    const planRef = doc(db, "users", currentUser.uid, "careers", careerId);
+
+    const saveLocalPlan = async () => {
+      setSyncStatus("syncing");
+      await setDoc(planRef, {
+        version: 3,
+        careerId,
+        subjects: subjectsRef.current,
+        strictMode: strictModeRef.current,
+        updatedAt: serverTimestamp(),
+        updatedAtIso: new Date().toISOString(),
+      });
+      cloudReadyRef.current = true;
+      setSyncStatus("synced");
+    };
+
+    return onSnapshot(planRef, async (snapshot) => {
+      try {
+        if (!snapshot.exists()) {
+          await saveLocalPlan();
+          resolvedCloudPlansRef.current.add(planKey);
+          return;
+        }
+
+        const remotePlan = snapshot.data();
+        if (!isValidCloudPlan(remotePlan, careerId)) {
+          cloudReadyRef.current = false;
+          setSyncStatus("error");
+          setAuthError("El plan guardado en la nube tiene un formato inválido y no fue aplicado.");
+          return;
+        }
+
+        const localSignature = serializePlan(subjectsRef.current, strictModeRef.current);
+        const remoteSignature = serializePlan(remotePlan.subjects, remotePlan.strictMode);
+        const firstResolution = !resolvedCloudPlansRef.current.has(planKey);
+
+        if (firstResolution && localSignature !== remoteSignature) {
+          resolvedCloudPlansRef.current.add(planKey);
+          const useCloud = window.confirm(
+            `Encontramos un progreso distinto de ${career.name} en tu cuenta.\n\n` +
+            "Aceptar: usar el progreso de la nube.\nCancelar: conservar este dispositivo y subirlo a la nube."
+          );
+
+          if (!useCloud) {
+            await saveLocalPlan();
+            return;
+          }
+        } else {
+          resolvedCloudPlansRef.current.add(planKey);
+        }
+
+        if (serializePlan(subjectsRef.current, strictModeRef.current) !== remoteSignature) {
+          subjectsRef.current = remotePlan.subjects;
+          strictModeRef.current = remotePlan.strictMode;
+          setSubjects(remotePlan.subjects);
+          setStrictMode(remotePlan.strictMode);
+        }
+        cloudReadyRef.current = true;
+        setSyncStatus("synced");
+        setAuthError("");
+      } catch (error) {
+        console.error("Error al resolver el plan de la nube:", error);
+        cloudReadyRef.current = false;
+        setSyncStatus("error");
+        setAuthError("No pudimos resolver el progreso local y el de la nube.");
+      }
+    }, (error) => {
+      console.error("Error en la sincronización en tiempo real:", error);
+      cloudReadyRef.current = false;
+      setSyncStatus("error");
+      setAuthError("No se pudo acceder a Firestore. Revisá las reglas y la conexión.");
+    });
+  }, [career.name, careerId, currentUser]);
+
+  const handleCareerChange = (nextCareerId) => {
+    const nextCareer = getCareerCatalog(nextCareerId);
+    if (!nextCareer.available) return;
+    const nextProgress = getStoredProgress(nextCareerId);
+
+    setCareerId(nextCareerId);
+    localStorage.setItem("udemm_tracker_career", nextCareerId);
+    subjectsRef.current = nextProgress;
+    setSubjects(nextProgress);
+    cloudReadyRef.current = false;
+    setSyncStatus(currentUser ? "syncing" : isFirebaseConfigured ? "signed-out" : "local");
+    setSelectedSubject(null);
+    setSearchTerm("");
+    setYearFilter("all");
+    setAvailableOnly(false);
+  };
 
   // Autodesplazamiento del chat
   useEffect(() => {
@@ -104,7 +271,9 @@ function App() {
 
     return subject.prereqs.every(prereqId => {
       const reqSub = currentSubjects.find(s => s.id === prereqId);
-      if (!reqSub) return true; // Si no se encuentra, por defecto pasa
+      // Una correlativa ausente es un problema de catálogo: no debe habilitar
+      // silenciosamente una materia ni producir un avance académico incorrecto.
+      if (!reqSub) return false;
 
       if (targetStatus === "studying" || targetStatus === "regular") {
         // Cursar o regularizar requiere que las previas estén al menos Regulares o Aprobadas
@@ -122,6 +291,9 @@ function App() {
   const getSubsequentSubjects = (subjectId) => {
     return subjects.filter(s => s.prereqs && s.prereqs.includes(subjectId));
   };
+
+  const getMissingPrerequisites = (subject) =>
+    (subject.prereqs || []).filter((prereqId) => !subjects.some((item) => item.id === prereqId));
 
   // Mueve una materia a un nuevo estado
   const moveSubject = (subjectId, newStatus, newGrade = null) => {
@@ -167,14 +339,16 @@ function App() {
   };
 
   // --- Estadísticas ---
-  const totalSubjects = subjects.length;
   const approvedSubjects = subjects.filter(s => s.status === "approved");
   const approvedCount = approvedSubjects.length;
   const studyingCount = subjects.filter(s => s.status === "studying").length;
   const regularCount = subjects.filter(s => s.status === "regular").length;
+  const availableCount = subjects.filter(
+    (subject) => subject.status === "pending" && checkPrerequisites(subject, "studying")
+  ).length;
   
-  // Porcentaje de avance de la carrera (basado en el total oficial de 53)
-  const officialTotal = 53;
+  // El total oficial pertenece al plan, no al largo del array (que puede incluir electivas).
+  const officialTotal = career.officialTotal;
   const progressPercentage = Math.min(Math.round((approvedCount / officialTotal) * 100), 100);
 
   // Promedio Simple (solo materias con nota numérica aprobadas)
@@ -213,96 +387,60 @@ function App() {
     moveSubject(subjectId, targetStatus);
   };
 
-  // --- Sincronización en Firebase ---
-  const triggerCloudSync = async (updatedSubjects) => {
-    if (!isFirebaseConfigured) return;
+  // --- Sincronización privada en Firebase ---
+  const triggerCloudSync = async (
+    updatedSubjects = subjectsRef.current,
+    updatedStrictMode = strictModeRef.current
+  ) => {
+    if (!isFirebaseConfigured || !currentUser || !cloudReadyRef.current) return;
+
     setSyncStatus("syncing");
     try {
-      // Guardar localmente y en nube si hay un shareCode
-      const code = shareCode || localStorage.getItem("udemm_tracker_share_code");
-      if (code) {
-        await setDoc(doc(db, "shared_plans", code), {
-          subjects: updatedSubjects,
-          strictMode,
-          updatedAt: new Date().toISOString()
-        });
-        setSyncStatus("synced");
-      } else {
-        setSyncStatus("local");
-      }
-    } catch (e) {
-      console.error("Error al sincronizar en la nube:", e);
-      setSyncStatus("local");
-    }
-  };
-
-  const handleGenerateShareCode = async () => {
-    if (!isFirebaseConfigured) {
-      alert("Firebase no está configurado. Completá las credenciales en la configuración (ícono de engranaje) para usar la nube.");
-      return;
-    }
-    setSyncStatus("syncing");
-    try {
-      await signInAnonymously(auth);
-      // Generar código único aleatorio tipo U-8F3A2
-      const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-      let code = "U-";
-      for (let i = 0; i < 5; i++) {
-        code += characters.charAt(Math.floor(Math.random() * characters.length));
-      }
-
-      await setDoc(doc(db, "shared_plans", code), {
-        subjects: subjects,
-        strictMode,
-        updatedAt: new Date().toISOString()
+      await setDoc(doc(db, "users", currentUser.uid, "careers", careerId), {
+        version: 3,
+        careerId,
+        subjects: updatedSubjects,
+        strictMode: updatedStrictMode,
+        updatedAt: serverTimestamp(),
+        updatedAtIso: new Date().toISOString(),
       });
-
-      setShareCode(code);
-      localStorage.setItem("udemm_tracker_share_code", code);
       setSyncStatus("synced");
-      setShowShareModal(true);
-    } catch (e) {
-      console.error("Error al generar código de compartido:", e);
-      alert("Hubo un error al generar tu código de sincronización. Chequeá tu conexión.");
-      setSyncStatus("local");
+      setAuthError("");
+    } catch (error) {
+      console.error("Error al sincronizar en la nube:", error);
+      setSyncStatus("error");
+      setAuthError("No pudimos guardar el último cambio en la nube. Sigue guardado en este dispositivo.");
     }
   };
 
-  const handleImportShareCode = async () => {
+  const handleGoogleSignIn = async () => {
     if (!isFirebaseConfigured) {
-      alert("Firebase no está configurado.");
+      setShowConfigModal(true);
       return;
     }
-    if (!inputShareCode.trim()) {
-      alert("Ingresá un código válido che.");
-      return;
-    }
-    
+
+    setAuthError("");
     setSyncStatus("syncing");
     try {
-      await signInAnonymously(auth);
-      const docRef = doc(db, "shared_plans", inputShareCode.trim().toUpperCase());
-      const docSnap = await getDoc(docRef);
+      await signInWithPopup(auth, googleProvider);
+    } catch (error) {
+      console.error("Error al iniciar sesión con Google:", error);
+      setSyncStatus("signed-out");
+      setAuthError(
+        error?.code === "auth/popup-closed-by-user"
+          ? "Se cerró la ventana de Google antes de completar el ingreso."
+          : "No se pudo iniciar sesión con Google. Revisá Authentication y los dominios autorizados."
+      );
+    }
+  };
 
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data.subjects) {
-          setSubjects(data.subjects);
-          if (data.strictMode !== undefined) setStrictMode(data.strictMode);
-          setShareCode(inputShareCode.trim().toUpperCase());
-          localStorage.setItem("udemm_tracker_share_code", inputShareCode.trim().toUpperCase());
-          setSyncStatus("synced");
-          alert("¡Plan importado y sincronizado con éxito!");
-          setInputShareCode("");
-        }
-      } else {
-        alert("Código no encontrado. Revisalo bien y volvé a intentar.");
-        setSyncStatus("local");
-      }
-    } catch (e) {
-      console.error("Error al importar código:", e);
-      alert("Error al conectarse con el servidor.");
-      setSyncStatus("local");
+  const handleSignOut = async () => {
+    try {
+      cloudReadyRef.current = false;
+      await signOut(auth);
+    } catch (error) {
+      console.error("Error al cerrar sesión:", error);
+      setAuthError("No se pudo cerrar la sesión.");
     }
   };
 
@@ -347,13 +485,13 @@ function App() {
         const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
         const prompt = `
-          Sos un Tutor Académico e Inteligencia Artificial para la carrera de Ingeniería en Sistemas en la Universidad de la Marina Mercante (UdeMM) en Argentina.
+          Sos un Tutor Académico e Inteligencia Artificial para la carrera de ${career.name} en la Universidad de la Marina Mercante (UdeMM) en Argentina.
           Tenés que comunicarte siempre en español argentino / rioplatense usando el voseo natural (ej: "tutorías", "tenés", "hacé", "mirá", "aprobaste", "che").
           
           Tu tarea es ayudar al estudiante a planificar su carrera, entender el árbol de correlativas, simular preguntas de examen, sugerir qué materias cursar y responder consultas.
           
           Aquí tenés su estado académico real:
-          - Total de Materias del Plan: 53.
+          - Total de Materias del Plan: ${officialTotal}.
           - Materias aprobadas actualmente: ${approvedCount}
           - Promedio simple: ${averageSimple}
           - Promedio ponderado: ${averageWeighted}
@@ -415,6 +553,16 @@ function App() {
 
   // --- Cambiar electiva ---
   const handleSelectElective = (subjectId, newElectiveId) => {
+    const catalogOptions = career.electiveOptions?.[subjectId];
+    if (catalogOptions) {
+      const selectedName = catalogOptions.find((option) => option === newElectiveId);
+      if (!selectedName) return;
+      const updated = subjects.map((subject) => subject.id === subjectId ? { ...subject, name: selectedName, electiveChoice: selectedName } : subject);
+      setSubjects(updated);
+      setSelectedSubject((subject) => subject && subject.id === subjectId ? { ...subject, name: selectedName, electiveChoice: selectedName } : subject);
+      triggerCloudSync(updated);
+      return;
+    }
     const isElectiveI = subjectId === "17" || ELECTIVES_I.some(e => e.id === subjectId);
     const options = isElectiveI ? ELECTIVES_I : ELECTIVES_II;
     const selected = options.find(o => o.id === newElectiveId);
@@ -443,12 +591,17 @@ function App() {
   const handleResetProgress = () => {
     const confirm = window.confirm("¿Estás seguro de que querés resetear tu progreso? Se va a borrar el historial actual de tus materias cursadas.");
     if (confirm) {
-      setSubjects(INITIAL_SUBJECTS);
-      setShareCode("");
-      localStorage.removeItem("udemm_tracker_share_code");
-      setSyncStatus(isFirebaseConfigured ? "synced" : "local");
+      subjectsRef.current = career.subjects;
+      setSubjects(career.subjects);
+      triggerCloudSync(career.subjects, strictModeRef.current);
       alert("Progreso reseteado exitosamente.");
     }
+  };
+
+  const handleStrictModeChange = (enabled) => {
+    strictModeRef.current = enabled;
+    setStrictMode(enabled);
+    triggerCloudSync(subjectsRef.current, enabled);
   };
 
   // Guardar clave manual
@@ -457,11 +610,58 @@ function App() {
     localStorage.setItem("udemm_tracker_gemini_key", key);
   };
 
+  const handleExportProgress = () => {
+    const backup = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      careerId,
+      careerName: career.name,
+      subjects,
+      strictMode,
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `udemm-tracker-${careerId}-respaldo.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleRestoreProgress = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const backup = JSON.parse(reader.result);
+        const validSubjects = Array.isArray(backup.subjects) && backup.subjects.every(
+          (subject) => typeof subject?.id === "string" && typeof subject?.status === "string"
+        );
+        if (backup.version !== 1 || backup.careerId !== careerId || !validSubjects) {
+          throw new Error("El archivo no corresponde a esta carrera o no tiene un formato válido.");
+        }
+        if (!window.confirm("¿Restaurar este respaldo? Va a reemplazar el progreso actual de esta carrera.")) return;
+        subjectsRef.current = backup.subjects;
+        setSubjects(backup.subjects);
+        const restoredStrictMode = typeof backup.strictMode === "boolean" ? backup.strictMode : strictModeRef.current;
+        strictModeRef.current = restoredStrictMode;
+        if (typeof backup.strictMode === "boolean") setStrictMode(restoredStrictMode);
+        triggerCloudSync(backup.subjects, restoredStrictMode);
+        alert("Respaldo restaurado correctamente.");
+      } catch (error) {
+        alert(error.message || "No se pudo restaurar el respaldo.");
+      }
+    };
+    reader.readAsText(file);
+  };
+
   // --- Filtros de materias ---
   const filteredSubjects = subjects.filter(s => {
     const matchesSearch = s.name.toLowerCase().includes(searchTerm.toLowerCase()) || s.id.includes(searchTerm);
     const matchesYear = yearFilter === "all" || String(s.year) === yearFilter;
-    return matchesSearch && matchesYear;
+    const matchesAvailability = !availableOnly || (s.status === "pending" && checkPrerequisites(s, "studying"));
+    return matchesSearch && matchesYear && matchesAvailability;
   });
 
   return (
@@ -469,10 +669,27 @@ function App() {
       {/* HEADER */}
       <header className="app-header glass">
         <div className="brand-section">
-          <GraduationCap className="logo-icon" size={38} />
+          <img className="udemm-logo" src={udemmLogo} alt="Universidad de la Marina Mercante" />
           <div>
             <h1 className="brand-title">UdeMM Tracker</h1>
-            <p className="brand-subtitle">Ingeniería en Sistemas</p>
+            <label className="career-picker-label">
+              <span className="sr-only">Carrera</span>
+              <select
+                className="career-picker"
+                value={careerId}
+                onChange={(event) => handleCareerChange(event.target.value)}
+                aria-label="Seleccionar carrera"
+              >
+                {CAREER_CATALOGS.map((option) => (
+                  <option key={option.id} value={option.id} disabled={!option.available}>
+                    {option.name}{option.available ? "" : " · próximamente"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <a className="career-source-link" href={career.sourceUrl} target="_blank" rel="noreferrer">
+              Plan oficial · {officialTotal} materias
+            </a>
           </div>
         </div>
 
@@ -501,13 +718,32 @@ function App() {
         {/* ACCIONES DE SINCRONIZACIÓN */}
         <div className="sync-section">
           <div className="sync-status">
-            <span className={`led ${syncStatus === "syncing" ? "syncing" : syncStatus === "synced" ? "synced" : "local"}`}></span>
-            {syncStatus === "syncing" ? "Sincronizando..." : syncStatus === "synced" ? "Sincronizado" : "Modo Local"}
+            <span className={`led ${syncStatus}`}></span>
+            {!authReady
+              ? "Verificando sesión..."
+              : syncStatus === "syncing"
+                ? "Sincronizando..."
+                : syncStatus === "synced"
+                  ? "Nube privada activa"
+                  : syncStatus === "error"
+                    ? "Error de nube"
+                    : syncStatus === "signed-out"
+                      ? "Sin sesión · Modo local"
+                      : "Modo local"}
           </div>
-          
-          {isFirebaseConfigured && (
-            <button className="action-btn-outline" onClick={handleGenerateShareCode} title="Sincronizar con la nube y obtener código">
-              <Share2 size={16} /> Sincronizar y Compartir
+
+          {isFirebaseConfigured && authReady && !currentUser && (
+            <button className="action-btn-outline" onClick={handleGoogleSignIn} title="Sincronizar con tu cuenta de Google">
+              <LogIn size={16} /> Ingresar con Google
+            </button>
+          )}
+
+          {currentUser && (
+            <button className="cloud-user" onClick={() => setShowConfigModal(true)} title={currentUser.email || "Cuenta conectada"}>
+              {currentUser.photoURL
+                ? <img src={currentUser.photoURL} alt="" referrerPolicy="no-referrer" />
+                : <Cloud size={16} />}
+              <span>{currentUser.displayName || currentUser.email || "Cuenta conectada"}</span>
             </button>
           )}
 
@@ -545,7 +781,7 @@ function App() {
           </div>
           <div className="stat-info">
             <span className="stat-val">{averageSimple}</span>
-            <span className="stat-label">Promedio Simple (12 materias con examen)</span>
+            <span className="stat-label">Promedio Simple ({gradedSubjects.length} materias con nota)</span>
           </div>
         </div>
 
@@ -558,7 +794,23 @@ function App() {
             <span className="stat-label">Cursando / Regulares</span>
           </div>
         </div>
+
+        <div className="stat-card glass-card">
+          <div className="stat-icon-wrapper">
+            <Unlock size={22} />
+          </div>
+          <div className="stat-info">
+            <span className="stat-val">{availableCount}</span>
+            <span className="stat-label">Materias disponibles para cursar</span>
+          </div>
+        </div>
       </section>
+
+      {(catalogValidation.duplicateIds.length > 0 || catalogValidation.missingPrerequisites.length > 0) && (
+        <div className="catalog-warning catalog-warning-page" role="alert">
+          Este catálogo tiene {catalogValidation.missingPrerequisites.length} correlatividad/es pendiente/s de validación oficial ({[...new Set(catalogValidation.missingPrerequisites.map(({ prerequisite }) => prerequisite))].join(", ")}). Las materias afectadas permanecen bloqueadas.
+        </div>
+      )}
 
       {/* VISTA 1: TABLERO KANBAN */}
       {activeTab === "kanban" && (
@@ -577,6 +829,13 @@ function App() {
             </div>
             
             <div className="filters-wrapper">
+              <button
+                className={`availability-filter ${availableOnly ? "active" : ""}`}
+                onClick={() => setAvailableOnly((current) => !current)}
+                aria-pressed={availableOnly}
+              >
+                <Unlock size={15} /> Disponibles ({availableCount})
+              </button>
               <select 
                 className="select-filter"
                 value={yearFilter}
@@ -998,21 +1257,29 @@ function App() {
               </div>
 
               {/* Selector de Electiva (si aplica) */}
-              {selectedSubject.isElectiveSlot && (
+              {selectedSubject.isElectiveSlot && (careerId === "sistemas" || career.electiveOptions?.[selectedSubject.id]) && (
                 <div className="form-group">
                   <label className="form-label">Personalizá tu materia Electiva:</label>
                   <select 
                     className="select-filter"
                     style={{ width: "100%" }}
-                    value={selectedSubject.id}
+                    value={selectedSubject.electiveChoice || selectedSubject.id}
                     onChange={(e) => handleSelectElective(selectedSubject.id, e.target.value)}
                   >
-                    {(selectedSubject.id.startsWith("17") ? ELECTIVES_I : ELECTIVES_II).map(option => (
-                      <option key={option.id} value={option.id}>
-                        {option.name} ({option.credits} Cr.)
+                    {(career.electiveOptions?.[selectedSubject.id] || (selectedSubject.id.startsWith("17") ? ELECTIVES_I : ELECTIVES_II)).map(option => (
+                      <option key={typeof option === "string" ? option : option.id} value={typeof option === "string" ? option : option.id}>
+                        {typeof option === "string" ? option : `${option.name} (${option.credits} Cr.)`}
                       </option>
                     ))}
                   </select>
+                </div>
+              )}
+              {selectedSubject.isElectiveSlot && careerId !== "sistemas" && !career.electiveOptions?.[selectedSubject.id] && (
+                <div className="form-group">
+                  <label className="form-label">Materia electiva oficial</label>
+                  <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)" }}>
+                    La selección de alternativas para esta carrera está en revisión de catálogo; el cupo ya se contabiliza como electiva.
+                  </p>
                 </div>
               )}
 
@@ -1078,6 +1345,11 @@ function App() {
               {/* Inspector de correlativas previas */}
               <div>
                 <h4 style={{ fontSize: "0.95rem", fontWeight: "600", marginBottom: "0.5rem" }}>Correlativas Requeridas:</h4>
+                {getMissingPrerequisites(selectedSubject).length > 0 && (
+                  <p className="catalog-warning" role="alert">
+                    Atención: el plan tiene correlatividades sin una materia asociada ({getMissingPrerequisites(selectedSubject).join(", ")}). Esta materia queda bloqueada hasta validar el catálogo oficial.
+                  </p>
+                )}
                 {selectedSubject.prereqs.length === 0 ? (
                   <p style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>No tiene correlativas previas requeridas.</p>
                 ) : (
@@ -1137,7 +1409,7 @@ function App() {
                   <input 
                     type="checkbox" 
                     checked={strictMode}
-                    onChange={(e) => setStrictMode(e.target.checked)}
+                    onChange={(e) => handleStrictModeChange(e.target.checked)}
                   />
                   <span>Habilitar Control Estricto de Correlativas</span>
                 </label>
@@ -1161,27 +1433,44 @@ function App() {
                 </p>
               </div>
 
-              {/* Importar código de compartido */}
-              {isFirebaseConfigured && (
-                <div className="form-group" style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem" }}>
-                  <label className="form-label">Cargar Plan por Código Único:</label>
-                  <div style={{ display: "flex", gap: "0.5rem" }}>
-                    <input 
-                      type="text"
-                      className="form-input"
-                      placeholder="Ej: U-8F3A2"
-                      value={inputShareCode}
-                      onChange={(e) => setInputShareCode(e.target.value)}
-                    />
-                    <button className="action-btn" onClick={handleImportShareCode}>
-                      Importar
+              {/* Cuenta y sincronización */}
+              <div className="form-group cloud-account-panel">
+                <div className="cloud-account-heading">
+                  <Cloud size={18} />
+                  <div>
+                    <strong>Sincronización privada</strong>
+                    <p>Tu avance se guarda por cuenta y por carrera.</p>
+                  </div>
+                </div>
+
+                {!isFirebaseConfigured ? (
+                  <p className="cloud-help">Firebase todavía no está configurado. Completá el archivo <code>.env</code> y reiniciá la aplicación.</p>
+                ) : currentUser ? (
+                  <div className="cloud-account-actions">
+                    <span>{currentUser.email || currentUser.displayName}</span>
+                    <button className="action-btn-outline" onClick={handleSignOut}>
+                      <LogOut size={16} /> Cerrar sesión
                     </button>
                   </div>
-                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                    Ingresá el código único de un compañero para visualizar e importar su mapa de materias actual.
-                  </p>
-                </div>
-              )}
+                ) : (
+                  <button className="action-btn" onClick={handleGoogleSignIn}>
+                    <LogIn size={16} /> Ingresar con Google
+                  </button>
+                )}
+
+                {authError && <p className="cloud-error" role="alert">{authError}</p>}
+              </div>
+
+              {/* Resetear Progreso */}
+              <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem", marginTop: "1rem" }}>
+                <button className="action-btn-outline" style={{ width: "100%" }} onClick={handleExportProgress}>
+                  Descargar respaldo de esta carrera
+                </button>
+                <label className="restore-backup-label">
+                  Restaurar respaldo de esta carrera
+                  <input type="file" accept="application/json,.json" onChange={handleRestoreProgress} />
+                </label>
+              </div>
 
               {/* Resetear Progreso */}
               <div style={{ borderTop: "1px solid var(--border-color)", paddingTop: "1rem", marginTop: "1rem" }}>
@@ -1199,42 +1488,6 @@ function App() {
         </div>
       )}
 
-      {/* MODAL 3: CÓDIGO COMPARTIDO */}
-      {showShareModal && (
-        <div className="modal-overlay" onClick={() => setShowShareModal(false)}>
-          <div className="modal-content animate-scale" style={{ maxWidth: "400px" }} onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="modal-title">¡Código de Sincronización!</h3>
-              <button className="modal-close-btn" onClick={() => setShowShareModal(false)}>✕</button>
-            </div>
-            
-            <div className="modal-body" style={{ textAlign: "center", gap: "1.25rem" }}>
-              <p style={{ fontSize: "0.9rem", color: "var(--text-secondary)" }}>
-                Este es tu Código Único de Compartido. Usalo para abrir tu progreso en otro dispositivo o pasárselo a un compañero:
-              </p>
-              
-              <div className="glass-card" style={{ 
-                padding: "1rem", 
-                fontSize: "2rem", 
-                fontWeight: "800", 
-                letterSpacing: "0.1em",
-                color: "var(--primary-hover)",
-                fontFamily: "var(--font-mono)"
-              }}>
-                {shareCode}
-              </div>
-
-              <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                Los cambios que realices a partir de ahora se guardarán automáticamente en la nube bajo este código.
-              </p>
-              
-              <button className="action-btn" style={{ width: "100%" }} onClick={() => setShowShareModal(false)}>
-                ¡Entendido!
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
