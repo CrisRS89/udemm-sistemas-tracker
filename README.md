@@ -68,7 +68,7 @@ npm run test:rules
 
 ### 3. Configurar IA (opcional)
 
-El tutor se conecta directamente desde el navegador al proveedor que configure cada usuario; no usa Cloud Functions ni un backend de IA de UdeMM. Cada usuario es responsable de su propia API key, cuenta y consumo. La clave se conserva solo en la sesión del navegador, pero como toda clave usada en frontend no puede considerarse completamente secreta. Las consultas incluyen el progreso académico y se envían al destino seleccionado.
+El tutor se conecta directamente desde el navegador al proveedor que configure cada usuario; no usa Cloud Functions ni un backend de IA de UdeMM. Ingresá la API key y usá **Probar conexión y cargar modelos** para consultar el catálogo actual de tu cuenta, verificar que la clave pueda listar modelos y elegir uno. Si el proveedor no habilita CORS para el sitio, se puede ingresar manualmente el ID publicado por ese proveedor. Cada usuario es responsable de su propia API key, cuenta y consumo. La clave se conserva solo en la sesión del navegador, pero como toda clave usada en frontend no puede considerarse completamente secreta. Las consultas incluyen el progreso académico y se envían al destino seleccionado.
 
 Para modelos locales compatibles con la API OpenAI (por ejemplo Ollama o LM Studio), elegí **IA local**, ingresá el identificador del modelo y la URL base de su servidor (Ollama suele usar `http://localhost:11434/v1`; LM Studio, `http://localhost:1234/v1`). El servidor local debe estar iniciado y permitir CORS para el origen de la aplicación. No hace falta iniciar sesión con Google para el tutor IA. Las llamadas a proveedores en la nube también dependen de que estos permitan solicitudes directas desde el navegador (CORS).
 

@@ -18,7 +18,7 @@ import {
   signInWithPopup,
   signOut,
 } from "./firebase";
-import { fetchOpenRouterModels, requestTutorResponse } from "./lib/ai-providers";
+import { fetchProviderModels, requestTutorResponse } from "./lib/ai-providers";
 import udemmLogo from "../logo/Logotipo UdeMM Universidad Privada.png";
 import { 
   GraduationCap, 
@@ -41,12 +41,12 @@ import {
 import "./App.css";
 
 const AI_PROVIDERS = [
-  { id: "gemini", label: "Google Gemini", exampleModel: "gemini-3.8-flash", keyPlaceholder: "API key de Google AI Studio" },
-  { id: "openai", label: "OpenAI", exampleModel: "gpt-4.1-mini", keyPlaceholder: "API key de OpenAI" },
-  { id: "anthropic", label: "Anthropic Claude", exampleModel: "claude-sonnet-4", keyPlaceholder: "API key de Anthropic" },
-  { id: "deepseek", label: "DeepSeek", exampleModel: "deepseek-chat", keyPlaceholder: "API key de DeepSeek" },
-  { id: "openrouter", label: "OpenRouter", exampleModel: "anthropic/claude-sonnet-4", keyPlaceholder: "API key de OpenRouter" },
-  { id: "local", label: "IA local (Ollama / LM Studio / compatible)", exampleModel: "llama3.2", keyPlaceholder: "Opcional; depende del servidor local" },
+  { id: "gemini", label: "Google Gemini", keyPlaceholder: "API key de Google AI Studio" },
+  { id: "openai", label: "OpenAI", keyPlaceholder: "API key de OpenAI" },
+  { id: "anthropic", label: "Anthropic Claude", keyPlaceholder: "API key de Anthropic" },
+  { id: "deepseek", label: "DeepSeek", keyPlaceholder: "API key de DeepSeek" },
+  { id: "openrouter", label: "OpenRouter", keyPlaceholder: "API key de OpenRouter" },
+  { id: "local", label: "IA local (Ollama / LM Studio / compatible)", keyPlaceholder: "Opcional; depende del servidor local" },
 ];
 const DEFAULT_CAREER_ID = "sistemas";
 const PROGRESS_STATUSES = new Set(["pending", "studying", "regular", "approved"]);
@@ -59,13 +59,11 @@ const getStoredAiConfig = (scope) => {
   try {
     const parsed = JSON.parse(localStorage.getItem(getAiConfigStorageKey(scope)) || "null");
     const provider = AI_PROVIDERS.find((entry) => entry.id === parsed?.provider)?.id || "gemini";
-    const model = typeof parsed?.model === "string" && parsed.model.trim()
-      ? parsed.model.trim()
-      : AI_PROVIDERS.find((entry) => entry.id === provider).exampleModel;
+    const model = typeof parsed?.model === "string" ? parsed.model.trim() : "";
     const localBaseUrl = typeof parsed?.localBaseUrl === "string" ? parsed.localBaseUrl : "http://localhost:11434/v1";
     return { provider, model, localBaseUrl };
   } catch {
-    return { provider: "gemini", model: "gemini-3.8-flash" };
+    return { provider: "gemini", model: "" };
   }
 };
 
@@ -172,9 +170,10 @@ function App() {
     getStoredAiKey("local", getStoredAiConfig("local").provider)
   );
   const [aiLocalBaseUrl, setAiLocalBaseUrl] = useState(() => getStoredAiConfig("local").localBaseUrl);
-  const [openRouterModels, setOpenRouterModels] = useState([]);
-  const [isLoadingOpenRouterModels, setIsLoadingOpenRouterModels] = useState(false);
-  const [openRouterModelsError, setOpenRouterModelsError] = useState("");
+  const [providerModels, setProviderModels] = useState([]);
+  const [isLoadingModels, setIsLoadingModels] = useState(false);
+  const [modelLoadStatus, setModelLoadStatus] = useState({ type: "idle", message: "" });
+  const modelRequestRef = useRef(0);
   const aiScope = getAiScope(currentUser?.uid);
 
   // Asistente de IA
@@ -217,31 +216,6 @@ function App() {
     setAiLocalBaseUrl(config.localBaseUrl || "http://localhost:11434/v1");
     setAiApiKey(getStoredAiKey(aiScope, config.provider));
   }, [aiScope]);
-
-  useEffect(() => {
-    if (aiProvider !== "openrouter") {
-      setOpenRouterModels([]);
-      setOpenRouterModelsError("");
-      setIsLoadingOpenRouterModels(false);
-      return undefined;
-    }
-
-    let isActive = true;
-    setIsLoadingOpenRouterModels(true);
-    setOpenRouterModelsError("");
-    fetchOpenRouterModels()
-      .then((models) => {
-        if (isActive) setOpenRouterModels(models);
-      })
-      .catch(() => {
-        if (isActive) setOpenRouterModelsError("No se pudo cargar el catálogo; podés escribir el ID del modelo manualmente.");
-      })
-      .finally(() => {
-        if (isActive) setIsLoadingOpenRouterModels(false);
-      });
-
-    return () => { isActive = false; };
-  }, [aiProvider]);
 
   useEffect(() => {
     if (!isFirebaseConfigured || !currentUser) return undefined;
@@ -696,15 +670,49 @@ function App() {
     const selectedProvider = AI_PROVIDERS.find((entry) => entry.id === provider);
     if (!selectedProvider) return;
     setAiProvider(selectedProvider.id);
-    setAiModel(selectedProvider.exampleModel);
+    setAiModel("");
     setAiApiKey(getStoredAiKey(aiScope, selectedProvider.id));
+    setProviderModels([]);
+    setModelLoadStatus({ type: "idle", message: "" });
+    setIsLoadingModels(false);
+    modelRequestRef.current += 1;
     const storedConfig = getStoredAiConfig(aiScope);
     setAiLocalBaseUrl(storedConfig.localBaseUrl || "http://localhost:11434/v1");
     localStorage.setItem(getAiConfigStorageKey(aiScope), JSON.stringify({
       provider: selectedProvider.id,
-      model: selectedProvider.exampleModel,
+      model: "",
       localBaseUrl: storedConfig.localBaseUrl || "http://localhost:11434/v1",
     }));
+  };
+
+  const handleLoadProviderModels = async () => {
+    const requestId = modelRequestRef.current + 1;
+    modelRequestRef.current = requestId;
+    setIsLoadingModels(true);
+    setProviderModels([]);
+    setModelLoadStatus({ type: "loading", message: "Probando la conexión y consultando modelos…" });
+    try {
+      const models = await fetchProviderModels({
+        provider: aiProvider,
+        apiKey: aiApiKey.trim(),
+        localBaseUrl: aiLocalBaseUrl,
+      });
+      if (requestId !== modelRequestRef.current) return;
+      const selectedModel = models.some((entry) => entry.id === aiModel) ? aiModel : "";
+      setProviderModels(models);
+      setAiModel(selectedModel);
+      localStorage.setItem(getAiConfigStorageKey(aiScope), JSON.stringify({
+        provider: aiProvider,
+        model: selectedModel,
+        localBaseUrl: aiLocalBaseUrl,
+      }));
+      setModelLoadStatus({ type: "success", message: `Conexión con el catálogo confirmada: ${models.length} modelos disponibles. Elegí uno de la lista. (Esto no genera una consulta de IA.)` });
+    } catch (error) {
+      if (requestId !== modelRequestRef.current) return;
+      setModelLoadStatus({ type: "error", message: error?.message || "No se pudo validar la conexión." });
+    } finally {
+      if (requestId === modelRequestRef.current) setIsLoadingModels(false);
+    }
   };
 
   const handleAiModelChange = (model) => {
@@ -717,16 +725,26 @@ function App() {
   };
 
   const handleAiLocalBaseUrlChange = (localBaseUrl) => {
+    modelRequestRef.current += 1;
     setAiLocalBaseUrl(localBaseUrl);
+    setAiModel("");
+    setProviderModels([]);
+    setModelLoadStatus({ type: "idle", message: "" });
+    setIsLoadingModels(false);
     localStorage.setItem(getAiConfigStorageKey(aiScope), JSON.stringify({
       provider: aiProvider,
-      model: aiModel,
+      model: "",
       localBaseUrl,
     }));
   };
 
   const handleSaveAiKey = (key) => {
+    modelRequestRef.current += 1;
     setAiApiKey(key);
+    setAiModel("");
+    setProviderModels([]);
+    setModelLoadStatus({ type: "idle", message: "" });
+    setIsLoadingModels(false);
     const storageKey = getAiKeyStorageKey(aiScope, aiProvider);
     if (key) sessionStorage.setItem(storageKey, key);
     else sessionStorage.removeItem(storageKey);
@@ -1555,31 +1573,6 @@ function App() {
                     <option key={provider.id} value={provider.id}>{provider.label}</option>
                   ))}
                 </select>
-                <label className="form-label" htmlFor="ai-model" style={{ marginTop: "0.75rem" }}>ID del modelo:</label>
-                <input 
-                  id="ai-model"
-                  type="text"
-                  className="form-input"
-                  list={aiProvider === "openrouter" ? "openrouter-model-options" : undefined}
-                  placeholder={AI_PROVIDERS.find((provider) => provider.id === aiProvider)?.exampleModel}
-                  value={aiModel}
-                  onChange={(e) => handleAiModelChange(e.target.value)}
-                />
-                {aiProvider === "openrouter" && (
-                  <>
-                    <datalist id="openrouter-model-options">
-                      {openRouterModels.map((model) => (
-                        <option key={model.id} value={model.id} label={model.name} />
-                      ))}
-                    </datalist>
-                    <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                      {isLoadingOpenRouterModels
-                        ? "Cargando catálogo de OpenRouter…"
-                        : `${openRouterModels.length} modelos de texto disponibles${openRouterModels.length ? "; escribí para filtrar" : "."}`}
-                    </p>
-                    {openRouterModelsError && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{openRouterModelsError}</p>}
-                  </>
-                )}
                 {aiProvider === "local" ? (
                   <>
                     <label className="form-label" htmlFor="ai-local-url" style={{ marginTop: "0.75rem" }}>URL base del servidor local:</label>
@@ -1592,6 +1585,39 @@ function App() {
                   <>
                     <label className="form-label" htmlFor="ai-api-key" style={{ marginTop: "0.75rem" }}>API key personal:</label>
                     <input id="ai-api-key" type="password" className="form-input" autoComplete="off" placeholder={AI_PROVIDERS.find((provider) => provider.id === aiProvider)?.keyPlaceholder} value={aiApiKey} onChange={(e) => handleSaveAiKey(e.target.value)} />
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="ai-model-load-button"
+                  style={{ marginTop: "0.9rem", width: "100%" }}
+                  onClick={handleLoadProviderModels}
+                  disabled={isLoadingModels}
+                >
+                  {isLoadingModels ? "Conectando y buscando modelos…" : "Probar conexión y cargar modelos"}
+                </button>
+                {modelLoadStatus.message && (
+                  <p role="status" style={{ fontSize: "0.85rem", color: modelLoadStatus.type === "error" ? "var(--danger, #b42318)" : modelLoadStatus.type === "success" ? "var(--success, #16803c)" : "var(--text-muted)", marginTop: "0.5rem" }}>
+                    {modelLoadStatus.message}
+                  </p>
+                )}
+                <label className="form-label" htmlFor="ai-model" style={{ marginTop: "0.75rem" }}>Modelo disponible en tu cuenta:</label>
+                {providerModels.length > 0 ? (
+                  <select id="ai-model" className="form-input" value={aiModel} onChange={(e) => handleAiModelChange(e.target.value)}>
+                    <option value="">Elegí un modelo…</option>
+                    {providerModels.map((model) => <option key={model.id} value={model.id}>{model.name} — {model.id}</option>)}
+                  </select>
+                ) : (
+                  <>
+                    <select id="ai-model" className="form-input" value="" disabled>
+                      <option value="">Primero probá la conexión y cargá los modelos</option>
+                    </select>
+                    {modelLoadStatus.type === "error" && (
+                      <>
+                        <label className="form-label" htmlFor="ai-model-manual" style={{ marginTop: "0.5rem" }}>O ingresá manualmente el ID:</label>
+                        <input id="ai-model-manual" type="text" className="form-input" value={aiModel} onChange={(e) => handleAiModelChange(e.target.value)} placeholder="ID exacto informado por tu proveedor" />
+                      </>
+                    )}
                   </>
                 )}
                 <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>

@@ -67,12 +67,67 @@ export function validateLocalBaseUrl(value) {
   return url.toString().replace(/\/$/, "");
 }
 
-export async function fetchOpenRouterModels() {
-  const response = await fetch("https://openrouter.ai/api/v1/models");
-  if (!response.ok) throw new Error("No se pudo consultar el catálogo de OpenRouter.");
+export async function fetchProviderModels({ provider, apiKey, localBaseUrl }) {
+  let url;
+  const headers = {};
+
+  if (provider === "gemini") {
+    url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000";
+    headers["x-goog-api-key"] = apiKey;
+  } else if (provider === "anthropic") {
+    url = "https://api.anthropic.com/v1/models?limit=1000";
+    headers["x-api-key"] = apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+    headers["anthropic-dangerous-direct-browser-access"] = "true";
+  } else if (provider === "openai") {
+    url = "https://api.openai.com/v1/models";
+    headers.Authorization = `Bearer ${apiKey}`;
+  } else if (provider === "deepseek") {
+    url = "https://api.deepseek.com/models";
+    headers.Authorization = `Bearer ${apiKey}`;
+  } else if (provider === "openrouter") {
+    url = "https://openrouter.ai/api/v1/models?output_modalities=text";
+    headers.Authorization = `Bearer ${apiKey}`;
+  } else if (provider === "local") {
+    url = `${validateLocalBaseUrl(localBaseUrl)}/models`;
+    if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  } else {
+    throw new Error("Proveedor desconocido.");
+  }
+
+  if (provider !== "local" && !apiKey?.trim()) {
+    throw new Error("Ingresá tu API key antes de probar la conexión.");
+  }
+
+  let response;
+  try {
+    response = await fetch(url, { headers, signal: AbortSignal.timeout(20000) });
+  } catch {
+    throw new Error("No se pudo conectar. Revisá la API key o URL y que el proveedor permita CORS desde esta app.");
+  }
+  if (response.status === 401 || response.status === 403) {
+    throw new Error("El proveedor rechazó la API key o no tiene permiso para listar modelos.");
+  }
+  if (response.status === 429) throw new Error("El proveedor limitó la consulta. Esperá un momento y volvé a probar.");
+  if (!response.ok) throw new Error(`El proveedor devolvió HTTP ${response.status} al consultar modelos.`);
+
   const data = await response.json();
-  return (Array.isArray(data?.data) ? data.data : [])
-    .filter((item) => typeof item?.id === "string" && (!item.architecture?.output_modalities || item.architecture.output_modalities.includes("text")))
-    .map((item) => ({ id: item.id, name: typeof item.name === "string" ? item.name.slice(0, 120) : item.id }))
-    .sort((a, b) => a.name.localeCompare(b.name)).slice(0, 500);
+  let models;
+  if (provider === "gemini") {
+    models = (data.models || [])
+      .filter((model) => model.supportedGenerationMethods?.includes("generateContent"))
+      .map((model) => ({ id: model.name?.replace(/^models\//, ""), name: model.displayName || model.name }));
+  } else {
+    const entries = Array.isArray(data.data) ? data.data : [];
+    models = entries
+      .filter((model) => typeof model.id === "string")
+      .filter((model) => provider !== "openrouter" || !model.architecture?.output_modalities || model.architecture.output_modalities.includes("text"))
+      .filter((model) => provider !== "deepseek" || !model.output_modalities || model.output_modalities.includes("text"))
+      .filter((model) => provider !== "openai" || !/(embed|whisper|transcri|moderation|dall-e|sora|realtime|audio|tts|image)/i.test(model.id))
+      .map((model) => ({ id: model.id, name: model.display_name || model.name || model.id }));
+  }
+
+  const unique = [...new Map(models.filter((model) => model.id).map((model) => [model.id, model])).values()];
+  if (!unique.length) throw new Error("La conexión respondió, pero no devolvió modelos utilizables para chat.");
+  return unique.sort((a, b) => a.name.localeCompare(b.name)).slice(0, 1000);
 }
