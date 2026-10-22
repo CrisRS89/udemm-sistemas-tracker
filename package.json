@@ -8,10 +8,10 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
+    "test:ai": "node --test tests/ai-providers.test.js",
     "test:rules": "npx -y firebase-tools@latest emulators:exec --only firestore \"node --test tests/firestore.rules.test.mjs\""
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
     "firebase": "^12.16.0",
     "lucide-react": "^1.24.0",
     "react": "^19.2.7",

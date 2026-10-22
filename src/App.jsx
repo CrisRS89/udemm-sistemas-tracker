@@ -18,6 +18,7 @@ import {
   signInWithPopup,
   signOut,
 } from "./firebase";
+import { fetchOpenRouterModels, requestTutorResponse } from "./lib/ai-providers";
 import udemmLogo from "../logo/Logotipo UdeMM Universidad Privada.png";
 import { 
   GraduationCap, 
@@ -37,13 +38,51 @@ import {
   LogIn,
   LogOut,
 } from "lucide-react";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import "./App.css";
 
-// Clave de API de Gemini desde entorno
-const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || "";
+const AI_PROVIDERS = [
+  { id: "gemini", label: "Google Gemini", exampleModel: "gemini-3.8-flash", keyPlaceholder: "API key de Google AI Studio" },
+  { id: "openai", label: "OpenAI", exampleModel: "gpt-4.1-mini", keyPlaceholder: "API key de OpenAI" },
+  { id: "anthropic", label: "Anthropic Claude", exampleModel: "claude-sonnet-4", keyPlaceholder: "API key de Anthropic" },
+  { id: "deepseek", label: "DeepSeek", exampleModel: "deepseek-chat", keyPlaceholder: "API key de DeepSeek" },
+  { id: "openrouter", label: "OpenRouter", exampleModel: "anthropic/claude-sonnet-4", keyPlaceholder: "API key de OpenRouter" },
+  { id: "local", label: "IA local (Ollama / LM Studio / compatible)", exampleModel: "llama3.2", keyPlaceholder: "Opcional; depende del servidor local" },
+];
 const DEFAULT_CAREER_ID = "sistemas";
 const PROGRESS_STATUSES = new Set(["pending", "studying", "regular", "approved"]);
+
+const getAiScope = (userId) => userId || "local";
+const getAiConfigStorageKey = (scope) => `udemm_tracker_ai_config_${scope}`;
+const getAiKeyStorageKey = (scope, provider) => `udemm_tracker_ai_key_${scope}_${provider}`;
+
+const getStoredAiConfig = (scope) => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(getAiConfigStorageKey(scope)) || "null");
+    const provider = AI_PROVIDERS.find((entry) => entry.id === parsed?.provider)?.id || "gemini";
+    const model = typeof parsed?.model === "string" && parsed.model.trim()
+      ? parsed.model.trim()
+      : AI_PROVIDERS.find((entry) => entry.id === provider).exampleModel;
+    const localBaseUrl = typeof parsed?.localBaseUrl === "string" ? parsed.localBaseUrl : "http://localhost:11434/v1";
+    return { provider, model, localBaseUrl };
+  } catch {
+    return { provider: "gemini", model: "gemini-3.8-flash" };
+  }
+};
+
+const getStoredAiKey = (scope, provider) => {
+  const scopedKey = sessionStorage.getItem(getAiKeyStorageKey(scope, provider));
+  if (scopedKey) return scopedKey;
+  // Compatibility for the old Gemini-only setting; move it out of persistent localStorage.
+  if (provider === "gemini" && scope === "local") {
+    const legacyKey = localStorage.getItem("udemm_tracker_gemini_key") || "";
+    if (legacyKey) {
+      sessionStorage.setItem(getAiKeyStorageKey(scope, provider), legacyKey);
+      localStorage.removeItem("udemm_tracker_gemini_key");
+      return legacyKey;
+    }
+  }
+  return "";
+};
 
 const isAvailableCareer = (careerId) =>
   CAREER_CATALOGS.some((career) => career.id === careerId && career.available);
@@ -127,9 +166,16 @@ function App() {
   // Modales
   const [selectedSubject, setSelectedSubject] = useState(null);
   const [showConfigModal, setShowConfigModal] = useState(false);
-  const [customGeminiKey, setCustomGeminiKey] = useState(() => {
-    return localStorage.getItem("udemm_tracker_gemini_key") || "";
-  });
+  const [aiProvider, setAiProvider] = useState(() => getStoredAiConfig("local").provider);
+  const [aiModel, setAiModel] = useState(() => getStoredAiConfig("local").model);
+  const [aiApiKey, setAiApiKey] = useState(() =>
+    getStoredAiKey("local", getStoredAiConfig("local").provider)
+  );
+  const [aiLocalBaseUrl, setAiLocalBaseUrl] = useState(() => getStoredAiConfig("local").localBaseUrl);
+  const [openRouterModels, setOpenRouterModels] = useState([]);
+  const [isLoadingOpenRouterModels, setIsLoadingOpenRouterModels] = useState(false);
+  const [openRouterModelsError, setOpenRouterModelsError] = useState("");
+  const aiScope = getAiScope(currentUser?.uid);
 
   // Asistente de IA
   const [messages, setMessages] = useState([
@@ -163,6 +209,39 @@ function App() {
       setSyncStatus(user ? "syncing" : "signed-out");
     });
   }, []);
+
+  useEffect(() => {
+    const config = getStoredAiConfig(aiScope);
+    setAiProvider(config.provider);
+    setAiModel(config.model);
+    setAiLocalBaseUrl(config.localBaseUrl || "http://localhost:11434/v1");
+    setAiApiKey(getStoredAiKey(aiScope, config.provider));
+  }, [aiScope]);
+
+  useEffect(() => {
+    if (aiProvider !== "openrouter") {
+      setOpenRouterModels([]);
+      setOpenRouterModelsError("");
+      setIsLoadingOpenRouterModels(false);
+      return undefined;
+    }
+
+    let isActive = true;
+    setIsLoadingOpenRouterModels(true);
+    setOpenRouterModelsError("");
+    fetchOpenRouterModels()
+      .then((models) => {
+        if (isActive) setOpenRouterModels(models);
+      })
+      .catch(() => {
+        if (isActive) setOpenRouterModelsError("No se pudo cargar el catálogo; podés escribir el ID del modelo manualmente.");
+      })
+      .finally(() => {
+        if (isActive) setIsLoadingOpenRouterModels(false);
+      });
+
+    return () => { isActive = false; };
+  }, [aiProvider]);
 
   useEffect(() => {
     if (!isFirebaseConfigured || !currentUser) return undefined;
@@ -486,14 +565,8 @@ function App() {
       .map(s => `- ${s.name} (${s.id}) [Año: ${s.year}]`)
       .join("\n");
 
-    const apiKey = customGeminiKey || GEMINI_API_KEY;
-
-    if (apiKey) {
-      // --- LLAMADA A LA API DE GEMINI REAL ---
+    if (aiProvider === "local" || aiApiKey.trim()) {
       try {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: "gemini-3.8-flash" });
-
         const prompt = `
           Sos un Tutor Académico e Inteligencia Artificial para la carrera de ${career.name} en la Universidad de la Marina Mercante (UdeMM) en Argentina.
           Tenés que comunicarte siempre en español argentino / rioplatense usando el voseo natural (ej: "tutorías", "tenés", "hacé", "mirá", "aprobaste", "che").
@@ -524,15 +597,20 @@ function App() {
           Respondé de forma profesional, amigable y bien argenta. Hacé hincapié en consejos reales sobre las correlativas y el avance. No inventes materias fuera del plan oficial de UdeMM que te pasé.
         `;
 
-        const result = await model.generateContent(prompt);
-        const text = result.response.text();
+        const text = await requestTutorResponse({
+          provider: aiProvider,
+          model: aiModel,
+          apiKey: aiApiKey.trim(),
+          prompt,
+          localBaseUrl: aiLocalBaseUrl,
+        });
         
         setMessages(prev => [...prev, { sender: "assistant", text }]);
       } catch (error) {
-        console.error("Error con Gemini:", error);
+        console.error("Error con el proveedor de IA:", error);
         setMessages(prev => [...prev, { 
           sender: "assistant", 
-          text: "Che, me dio un error al llamar a la API de Gemini. Verificá si tu API Key está bien ingresada en la configuración o si tenés problemas de conexión." 
+          text: `No pude conectar con ${AI_PROVIDERS.find((provider) => provider.id === aiProvider)?.label || "el proveedor de IA"}. ${error?.message || "Revisá tu API key, el modelo y tu conexión."}`
         }]);
       } finally {
         setIsTyping(false);
@@ -552,7 +630,7 @@ function App() {
         } else if (lowerMsg.includes("final") || lowerMsg.includes("examen") || lowerMsg.includes("pregunta") || lowerMsg.includes("simular")) {
           aiResponse = `¡Dale! Vamos a simular un final. Decime de qué materia te gustaría que te tome preguntas (por ejemplo: Matemática Discreta, Sintaxis, o Estructuras de Datos) y te tiro un par de conceptos clave típicos de examen de la UdeMM para ver cómo estás parado.`;
         } else {
-          aiResponse = `Mirá, te comento. Tu perfil actual tiene **${approvedCount}** aprobadas y estás cursando **${studyingCount}** materias. Si querés una respuesta ultra personalizada usando modelos de lenguaje de última generación, acordate que podés ingresar tu **Gemini API Key** haciendo clic en el engranaje de configuración arriba a la derecha. ¡Con eso me conecto directo a la nube y te tiro ideas súper precisas!`;
+          aiResponse = `Mirá, te comento. Tu perfil actual tiene **${approvedCount}** aprobadas y estás cursando **${studyingCount}** materias. Si querés una respuesta ultra personalizada con un modelo de IA, elegí el proveedor, el modelo e ingresá tu API key desde el engranaje de configuración.`;
         }
 
         setMessages(prev => [...prev, { sender: "assistant", text: aiResponse }]);
@@ -614,10 +692,44 @@ function App() {
     triggerCloudSync(subjectsRef.current, enabled);
   };
 
-  // Guardar clave manual
-  const handleSaveCustomKey = (key) => {
-    setCustomGeminiKey(key);
-    localStorage.setItem("udemm_tracker_gemini_key", key);
+  const handleAiProviderChange = (provider) => {
+    const selectedProvider = AI_PROVIDERS.find((entry) => entry.id === provider);
+    if (!selectedProvider) return;
+    setAiProvider(selectedProvider.id);
+    setAiModel(selectedProvider.exampleModel);
+    setAiApiKey(getStoredAiKey(aiScope, selectedProvider.id));
+    const storedConfig = getStoredAiConfig(aiScope);
+    setAiLocalBaseUrl(storedConfig.localBaseUrl || "http://localhost:11434/v1");
+    localStorage.setItem(getAiConfigStorageKey(aiScope), JSON.stringify({
+      provider: selectedProvider.id,
+      model: selectedProvider.exampleModel,
+      localBaseUrl: storedConfig.localBaseUrl || "http://localhost:11434/v1",
+    }));
+  };
+
+  const handleAiModelChange = (model) => {
+    setAiModel(model);
+    localStorage.setItem(getAiConfigStorageKey(aiScope), JSON.stringify({
+      provider: aiProvider,
+      model,
+      localBaseUrl: aiLocalBaseUrl,
+    }));
+  };
+
+  const handleAiLocalBaseUrlChange = (localBaseUrl) => {
+    setAiLocalBaseUrl(localBaseUrl);
+    localStorage.setItem(getAiConfigStorageKey(aiScope), JSON.stringify({
+      provider: aiProvider,
+      model: aiModel,
+      localBaseUrl,
+    }));
+  };
+
+  const handleSaveAiKey = (key) => {
+    setAiApiKey(key);
+    const storageKey = getAiKeyStorageKey(aiScope, aiProvider);
+    if (key) sessionStorage.setItem(storageKey, key);
+    else sessionStorage.removeItem(storageKey);
   };
 
   const handleExportProgress = () => {
@@ -1178,7 +1290,9 @@ function App() {
               <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
                 <Sparkles size={16} style={{ color: "var(--accent)" }} />
                 <span style={{ fontSize: "0.8rem", color: "var(--text-secondary)", fontWeight: "500" }}>
-                  {(customGeminiKey || GEMINI_API_KEY) ? "Modelo: Gemini (Nube)" : "Modelo: Tutor Local (Simulado)"}
+                  {aiProvider === "local" || aiApiKey
+                    ? `IA: ${AI_PROVIDERS.find((provider) => provider.id === aiProvider)?.label} · ${aiModel}`
+                    : "Modelo: Tutor Local (Simulado)"}
                 </span>
               </div>
             </div>
@@ -1428,18 +1542,62 @@ function App() {
                 </p>
               </div>
 
-              {/* API Key de Gemini */}
+              {/* Proveedor y modelo de IA */}
               <div className="form-group">
-                <label className="form-label">Google Gemini API Key (Opcional):</label>
-                <input 
-                  type="password"
+                <label className="form-label" htmlFor="ai-provider">Proveedor de IA:</label>
+                <select
+                  id="ai-provider"
                   className="form-input"
-                  placeholder="AIzaSy..."
-                  value={customGeminiKey}
-                  onChange={(e) => handleSaveCustomKey(e.target.value)}
+                  value={aiProvider}
+                  onChange={(e) => handleAiProviderChange(e.target.value)}
+                >
+                  {AI_PROVIDERS.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.label}</option>
+                  ))}
+                </select>
+                <label className="form-label" htmlFor="ai-model" style={{ marginTop: "0.75rem" }}>ID del modelo:</label>
+                <input 
+                  id="ai-model"
+                  type="text"
+                  className="form-input"
+                  list={aiProvider === "openrouter" ? "openrouter-model-options" : undefined}
+                  placeholder={AI_PROVIDERS.find((provider) => provider.id === aiProvider)?.exampleModel}
+                  value={aiModel}
+                  onChange={(e) => handleAiModelChange(e.target.value)}
                 />
+                {aiProvider === "openrouter" && (
+                  <>
+                    <datalist id="openrouter-model-options">
+                      {openRouterModels.map((model) => (
+                        <option key={model.id} value={model.id} label={model.name} />
+                      ))}
+                    </datalist>
+                    <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                      {isLoadingOpenRouterModels
+                        ? "Cargando catálogo de OpenRouter…"
+                        : `${openRouterModels.length} modelos de texto disponibles${openRouterModels.length ? "; escribí para filtrar" : "."}`}
+                    </p>
+                    {openRouterModelsError && <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{openRouterModelsError}</p>}
+                  </>
+                )}
+                {aiProvider === "local" ? (
+                  <>
+                    <label className="form-label" htmlFor="ai-local-url" style={{ marginTop: "0.75rem" }}>URL base del servidor local:</label>
+                    <input id="ai-local-url" type="url" className="form-input" value={aiLocalBaseUrl} onChange={(e) => handleAiLocalBaseUrlChange(e.target.value)} placeholder="http://localhost:11434/v1" />
+                    <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>Ollama suele usar <code>http://localhost:11434/v1</code>; LM Studio, <code>http://localhost:1234/v1</code>. Cargá el modelo tal como lo identifica tu servidor. Tiene que estar iniciado y habilitar CORS para esta app. Algunos servidores piden una clave local opcional.</p>
+                    <label className="form-label" htmlFor="ai-api-key" style={{ marginTop: "0.75rem" }}>Clave local (si tu servidor la requiere):</label>
+                    <input id="ai-api-key" type="password" className="form-input" autoComplete="off" placeholder="Opcional" value={aiApiKey} onChange={(e) => handleSaveAiKey(e.target.value)} />
+                  </>
+                ) : (
+                  <>
+                    <label className="form-label" htmlFor="ai-api-key" style={{ marginTop: "0.75rem" }}>API key personal:</label>
+                    <input id="ai-api-key" type="password" className="form-input" autoComplete="off" placeholder={AI_PROVIDERS.find((provider) => provider.id === aiProvider)?.keyPlaceholder} value={aiApiKey} onChange={(e) => handleSaveAiKey(e.target.value)} />
+                  </>
+                )}
                 <p style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-                  Ingresá tu API Key de Gemini para activar el Asistente IA interactivo de la nube de forma directa y segura. La clave se guarda localmente en tu navegador.
+                  {aiProvider === "local"
+                    ? "La solicitud va directamente de tu navegador a tu servidor local; no pasa por Firebase ni por un backend de UdeMM."
+                    : "La solicitud y tu clave van directamente desde el navegador al proveedor elegido, sin pasar por Firebase ni un backend de UdeMM. La clave solo se conserva durante esta sesión. Cada usuario se hace cargo de su cuenta y consumo."} Las consultas incluyen tu carrera y progreso académico y se envían al destino configurado. Las llamadas directas dependen del soporte CORS del proveedor; las claves en el navegador no son secretos protegidos frente a extensiones maliciosas o vulnerabilidades XSS.
                 </p>
               </div>
 
