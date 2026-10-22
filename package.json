@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:rules": "npx -y firebase-tools@latest emulators:exec --only firestore \"node --test tests/firestore.rules.test.mjs\""
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
@@ -17,10 +18,14 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
     "oxlint": "^1.71.0",
     "vite": "^8.1.1"
+  },
+  "overrides": {
+    "@grpc/grpc-js": "1.14.6"
   }
 }

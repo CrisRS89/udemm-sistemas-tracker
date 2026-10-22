@@ -72,13 +72,24 @@ const getStoredProgress = (careerId) => {
 
 const serializePlan = (subjects, strictMode) => JSON.stringify({ subjects, strictMode });
 
-const isValidCloudPlan = (data, careerId) =>
-  data?.careerId === careerId &&
-  Array.isArray(data.subjects) &&
-  data.subjects.every(
-    (subject) => typeof subject?.id === "string" && PROGRESS_STATUSES.has(subject?.status)
-  ) &&
-  typeof data.strictMode === "boolean";
+const parseCloudPlan = (data, careerId) => {
+  if (
+    data?.version !== 3 ||
+    data?.careerId !== careerId ||
+    typeof data?.subjectsJson !== "string" ||
+    typeof data?.strictMode !== "boolean"
+  ) return null;
+
+  try {
+    const cloudSubjects = JSON.parse(data.subjectsJson);
+    const hasValidProgress = Array.isArray(cloudSubjects) && cloudSubjects.every(
+      (subject) => typeof subject?.id === "string" && PROGRESS_STATUSES.has(subject?.status)
+    );
+    return hasValidProgress ? { subjects: cloudSubjects, strictMode: data.strictMode } : null;
+  } catch {
+    return null;
+  }
+};
 
 function App() {
   // --- Estados de la aplicación ---
@@ -166,10 +177,9 @@ function App() {
       await setDoc(planRef, {
         version: 3,
         careerId,
-        subjects: subjectsRef.current,
+        subjectsJson: JSON.stringify(subjectsRef.current),
         strictMode: strictModeRef.current,
         updatedAt: serverTimestamp(),
-        updatedAtIso: new Date().toISOString(),
       });
       cloudReadyRef.current = true;
       setSyncStatus("synced");
@@ -183,8 +193,8 @@ function App() {
           return;
         }
 
-        const remotePlan = snapshot.data();
-        if (!isValidCloudPlan(remotePlan, careerId)) {
+        const remotePlan = parseCloudPlan(snapshot.data(), careerId);
+        if (!remotePlan) {
           cloudReadyRef.current = false;
           setSyncStatus("error");
           setAuthError("El plan guardado en la nube tiene un formato inválido y no fue aplicado.");
@@ -399,10 +409,9 @@ function App() {
       await setDoc(doc(db, "users", currentUser.uid, "careers", careerId), {
         version: 3,
         careerId,
-        subjects: updatedSubjects,
+        subjectsJson: JSON.stringify(updatedSubjects),
         strictMode: updatedStrictMode,
         updatedAt: serverTimestamp(),
-        updatedAtIso: new Date().toISOString(),
       });
       setSyncStatus("synced");
       setAuthError("");
@@ -426,10 +435,11 @@ function App() {
     } catch (error) {
       console.error("Error al iniciar sesión con Google:", error);
       setSyncStatus("signed-out");
+      const firebaseErrorCode = error?.code || "auth/error-desconocido";
       setAuthError(
         error?.code === "auth/popup-closed-by-user"
           ? "Se cerró la ventana de Google antes de completar el ingreso."
-          : "No se pudo iniciar sesión con Google. Revisá Authentication y los dominios autorizados."
+          : `No se pudo iniciar sesión con Google (${firebaseErrorCode}). Revisá Authentication y los dominios autorizados.`
       );
     }
   };

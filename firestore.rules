@@ -2,8 +2,24 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed data model
+    // ===============================================================
+    // users/{userId}/careers/{careerId}
+    //   version: int (required, exactly 3)
+    //   careerId: string (required, supported path career)
+    //   subjectsJson: string (required, JSON, 2..200000 bytes)
+    //   strictMode: bool (required)
+    //   updatedAt: timestamp (required, server timestamp)
+    //
+    // No PII, public profiles, roles or sharing metadata are stored.
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
     function isOwner(userId) {
-      return request.auth != null && request.auth.uid == userId;
+      return isAuthenticated() && request.auth.uid == userId;
     }
 
     function isSupportedCareer(careerId) {
@@ -16,29 +32,40 @@ service cloud.firestore {
       ];
     }
 
-    function isValidPlan(careerId) {
-      return request.resource.data.keys().hasOnly([
+    function isValidPlan(data, careerId) {
+      return data.keys().hasAll([
           'version',
           'careerId',
-          'subjects',
+          'subjectsJson',
           'strictMode',
-          'updatedAt',
-          'updatedAtIso'
+          'updatedAt'
         ])
-        && request.resource.data.version == 3
-        && request.resource.data.careerId == careerId
+        && data.keys().hasOnly([
+          'version',
+          'careerId',
+          'subjectsJson',
+          'strictMode',
+          'updatedAt'
+        ])
+        && data.version is int
+        && data.version == 3
+        && data.careerId is string
+        && data.careerId == careerId
         && isSupportedCareer(careerId)
-        && request.resource.data.subjects is list
-        && request.resource.data.subjects.size() <= 200
-        && request.resource.data.strictMode is bool
-        && request.resource.data.updatedAt is timestamp
-        && request.resource.data.updatedAtIso is string;
+        && data.subjectsJson is string
+        && data.subjectsJson.size() >= 2
+        && data.subjectsJson.size() <= 200000
+        && data.strictMode is bool
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
     }
 
     match /users/{userId}/careers/{careerId} {
       allow read: if isOwner(userId);
-      allow create, update: if isOwner(userId) && isValidPlan(careerId);
-      allow delete: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidPlan(request.resource.data, careerId);
+      allow update: if isOwner(userId)
+        && isValidPlan(request.resource.data, careerId)
+        && request.resource.data.careerId == resource.data.careerId;
     }
 
     // Todo lo demás, incluidos los antiguos shared_plans anónimos, queda cerrado.

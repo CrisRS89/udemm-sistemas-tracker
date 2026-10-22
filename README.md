@@ -41,12 +41,11 @@ Si querés sincronizar tu progreso entre dispositivos:
 1.  Creá un proyecto web en la [Consola de Firebase](https://console.firebase.google.com/).
 2.  En **Authentication → Sign-in method**, habilitá **Google**. No habilites el acceso anónimo.
 3.  Creá **Firestore Database**. Las reglas incluidas en `firestore.rules` bloquean todo salvo el documento del usuario autenticado.
-4.  Instalá Firebase CLI si todavía no está disponible, iniciá sesión y vinculá el proyecto:
+4.  Iniciá sesión con Firebase CLI y vinculá el proyecto. Los comandos usan la versión más reciente sin instalarla globalmente:
     ```bash
-    npm install --global firebase-tools
-    firebase login
-    firebase use --add
-    firebase deploy --only firestore:rules
+    npx -y firebase-tools@latest login
+    npx -y firebase-tools@latest use --add
+    npx -y firebase-tools@latest deploy --only firestore
     ```
 5.  Duplicá `.env.example` como `.env` y cargá la configuración de tu aplicación web:
     ```env
@@ -60,6 +59,12 @@ Si querés sincronizar tu progreso entre dispositivos:
 6.  Reiniciá Vite, abrí la aplicación y seleccioná **Ingresar con Google**. La primera vez que haya progreso distinto, la app te permitirá elegir entre la copia local y la nube.
 
 Los datos se guardan en `users/{uid}/careers/{careerId}`. Los antiguos documentos anónimos `shared_plans` no son usados y quedan bloqueados por las reglas actuales.
+
+Antes de desplegar cambios en las reglas, ejecutá su suite contra el emulador local:
+
+```bash
+npm run test:rules
+```
 
 ### 3. Configurar Gemini (opcional)
 
